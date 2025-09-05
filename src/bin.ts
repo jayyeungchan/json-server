@@ -14,6 +14,7 @@ import { fileURLToPath } from 'node:url'
 import { createApp } from './app.js'
 import { Observer } from './observer.js'
 import { Data } from './service.js'
+import { generateDatabaseFromInterface } from './interface-generator.js'
 
 function help() {
   console.log(`Usage: json-server [options] <file>
@@ -22,6 +23,7 @@ Options:
   -p, --port <port>  Port (default: 3000)
   -h, --host <host>  Host (default: localhost)
   -s, --static <dir> Static files directory (multiple allowed)
+  -i, --interface <file> TypeScript interface file to generate JSON data from
   --help             Show this message
   --version          Show version number
 `)
@@ -33,6 +35,7 @@ function args(): {
   port: number
   host: string
   static: string[]
+  interface?: string
 } {
   try {
     const { values, positionals } = parseArgs({
@@ -52,6 +55,10 @@ function args(): {
           short: 's',
           multiple: true,
           default: [],
+        },
+        interface: {
+          type: 'string',
+          short: 'i',
         },
         help: {
           type: 'boolean',
@@ -100,6 +107,7 @@ function args(): {
       port: parseInt(values.port as string),
       host: values.host as string,
       static: values.static as string[],
+      interface: values.interface as string | undefined,
     }
   } catch (e) {
     if ((e as NodeJS.ErrnoException).code === 'ERR_PARSE_ARGS_UNKNOWN_OPTION') {
@@ -112,7 +120,47 @@ function args(): {
   }
 }
 
-const { file, port, host, static: staticArr } = args()
+const { file, port, host, static: staticArr, interface: interfaceFile } = args()
+
+// 如果指定了interface文件，从interface生成JSON数据
+if (interfaceFile) {
+  if (!existsSync(interfaceFile)) {
+    console.log(chalk.red(`Interface file ${interfaceFile} not found`))
+    process.exit(1)
+  }
+
+  try {
+    console.log(chalk.blue(`Generating JSON data from interface file: ${interfaceFile}`))
+    const generatedData = generateDatabaseFromInterface(interfaceFile)
+    
+    // 如果JSON文件不存在，创建它
+    if (!existsSync(file)) {
+      writeFileSync(file, JSON.stringify(generatedData, null, 2))
+      console.log(chalk.green(`Created ${file} with generated data from ${interfaceFile}`))
+    } else {
+      // 如果JSON文件存在，询问是否覆盖或合并
+      const existingContent = readFileSync(file, 'utf-8').trim()
+      if (existingContent === '' || existingContent === '{}') {
+        writeFileSync(file, JSON.stringify(generatedData, null, 2))
+        console.log(chalk.green(`Updated ${file} with generated data from ${interfaceFile}`))
+      } else {
+        console.log(chalk.yellow(`${file} already contains data. Generated data will be merged.`))
+        try {
+          const existingData = JSON.parse(existingContent)
+          const mergedData = { ...existingData, ...generatedData }
+          writeFileSync(file, JSON.stringify(mergedData, null, 2))
+          console.log(chalk.green(`Merged generated data into ${file}`))
+        } catch (e) {
+          console.log(chalk.red(`Error parsing existing ${file}: ${e}`))
+          process.exit(1)
+        }
+      }
+    }
+  } catch (error) {
+    console.log(chalk.red(`Error generating data from interface file: ${error}`))
+    process.exit(1)
+  }
+}
 
 if (!existsSync(file)) {
   console.log(chalk.red(`File ${file} not found`))
