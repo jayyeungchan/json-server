@@ -15,6 +15,8 @@ import { createApp } from './app.js'
 import { Observer } from './observer.js'
 import { Data } from './service.js'
 import { generateDatabaseFromInterface } from './interface-generator.js'
+import { OpenAIService } from './openai-service.js'
+import { InterfaceParser } from './interface-parser.js'
 
 function help() {
   console.log(`Usage: json-server [options] <file>
@@ -24,6 +26,7 @@ Options:
   -h, --host <host>  Host (default: localhost)
   -s, --static <dir> Static files directory (multiple allowed)
   -i, --interface <file> TypeScript interface file to generate JSON data from
+  --ai <interface>   Generate JSON data using OpenAI API from TypeScript interface
   --help             Show this message
   --version          Show version number
 `)
@@ -36,6 +39,7 @@ function args(): {
   host: string
   static: string[]
   interface?: string
+  ai?: string
 } {
   try {
     const { values, positionals } = parseArgs({
@@ -59,6 +63,9 @@ function args(): {
         interface: {
           type: 'string',
           short: 'i',
+        },
+        ai: {
+          type: 'string',
         },
         help: {
           type: 'boolean',
@@ -108,6 +115,7 @@ function args(): {
       host: values.host as string,
       static: values.static as string[],
       interface: values.interface as string | undefined,
+      ai: values.ai as string | undefined,
     }
   } catch (e) {
     if ((e as NodeJS.ErrnoException).code === 'ERR_PARSE_ARGS_UNKNOWN_OPTION') {
@@ -120,7 +128,7 @@ function args(): {
   }
 }
 
-const { file, port, host, static: staticArr, interface: interfaceFile } = args()
+const { file, port, host, static: staticArr, interface: interfaceFile, ai: aiFile } = args()
 
 // 如果指定了interface文件，从interface生成JSON数据
 if (interfaceFile) {
@@ -158,6 +166,57 @@ if (interfaceFile) {
     }
   } catch (error) {
     console.log(chalk.red(`Error generating data from interface file: ${error}`))
+    process.exit(1)
+  }
+}
+
+// 如果指定了AI文件，使用OpenAI API生成JSON数据
+if (aiFile) {
+  if (!existsSync(aiFile)) {
+    console.log(chalk.red(`AI interface file ${aiFile} not found`))
+    process.exit(1)
+  }
+
+  try {
+    console.log(chalk.blue(`Generating JSON data using OpenAI from interface file: ${aiFile}`))
+    
+    // 验证接口文件
+    if (!InterfaceParser.validateInterfaceFile(aiFile)) {
+      console.log(chalk.red(`Invalid TypeScript interface file: ${aiFile}`))
+      process.exit(1)
+    }
+    
+    // 创建OpenAI服务实例
+    const openaiService = new OpenAIService()
+    
+    // 生成JSON数据
+    const generatedData = await openaiService.generateJSONFromInterface(aiFile)
+    
+    // 如果JSON文件不存在，创建它
+    if (!existsSync(file)) {
+      writeFileSync(file, JSON.stringify(generatedData, null, 2))
+      console.log(chalk.green(`Created ${file} with AI-generated data from ${aiFile}`))
+    } else {
+      // 如果JSON文件存在，询问是否覆盖或合并
+      const existingContent = readFileSync(file, 'utf-8').trim()
+      if (existingContent === '' || existingContent === '{}') {
+        writeFileSync(file, JSON.stringify(generatedData, null, 2))
+        console.log(chalk.green(`Updated ${file} with AI-generated data from ${aiFile}`))
+      } else {
+        console.log(chalk.yellow(`${file} already contains data. AI-generated data will be merged.`))
+        try {
+          const existingData = JSON.parse(existingContent)
+          const mergedData = { ...existingData, ...generatedData }
+          writeFileSync(file, JSON.stringify(mergedData, null, 2))
+          console.log(chalk.green(`Merged AI-generated data into ${file}`))
+        } catch (e) {
+          console.log(chalk.red(`Error parsing existing ${file}: ${e}`))
+          process.exit(1)
+        }
+      }
+    }
+  } catch (error) {
+    console.log(chalk.red(`Error generating data using OpenAI: ${error}`))
     process.exit(1)
   }
 }
