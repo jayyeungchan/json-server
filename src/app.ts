@@ -39,20 +39,72 @@ export function createApp(db: Low<Data>, options: AppOptions = {}) {
     ?.map((path) => (isAbsolute(path) ? path : join(process.cwd(), path)))
     .forEach((dir) => app.use(sirv(dir, { dev: !isProduction })))
 
-  // CORS
+  // CORS - 安全配置
+  const corsOptions = {
+    // 允许的来源（生产环境应该明确指定）
+    origin: isProduction
+      ? process.env['ALLOWED_ORIGINS']?.split(',') || false
+      : true, // 开发环境允许所有来源
+    // 允许的HTTP方法
+    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+    // 允许的请求头
+    allowedHeaders: [
+      'Content-Type',
+      'Authorization',
+      'X-Requested-With',
+      'Accept',
+      'Origin'
+    ],
+    // 允许发送凭据
+    credentials: false,
+    // 预检请求缓存时间（秒）
+    maxAge: 86400, // 24小时
+    // 暴露的响应头
+    exposedHeaders: ['X-Total-Count'],
+  }
+
   app
     .use((req, res, next) => {
-      return cors({
-        allowedHeaders: req.headers['access-control-request-headers']
-          ?.split(',')
-          .map((h) => h.trim()),
-      })(req, res, next)
+      // 动态处理请求头
+      const requestedHeaders = req.headers['access-control-request-headers']
+      if (requestedHeaders) {
+        const headers = requestedHeaders.split(',').map((h) => h.trim())
+        // 只允许安全的请求头
+        const safeHeaders = headers.filter(header =>
+          corsOptions.allowedHeaders.includes(header) ||
+          header.toLowerCase().startsWith('x-custom-')
+        )
+        return cors({
+          ...corsOptions,
+          allowedHeaders: [...corsOptions.allowedHeaders, ...safeHeaders]
+        })(req, res, next)
+      }
+      return cors(corsOptions)(req, res, next)
     })
-    .options('*', cors())
+    .options('*', cors(corsOptions))
 
-  // Body parser
+  // 请求大小限制和安全中间件
+  app.use((req, res, next) => {
+    // 请求大小限制 (5MB)
+    const contentLength = req.headers['content-length']
+    if (contentLength && parseInt(contentLength) > 5 * 1024 * 1024) {
+      res.status(413).json({ error: 'Request entity too large' })
+      return
+    }
+
+    // 基本的请求头验证
+    const userAgent = req.headers['user-agent']
+    if (!userAgent || userAgent.length > 1000) {
+      res.status(400).json({ error: 'Invalid or missing User-Agent header' })
+      return
+    }
+
+    next?.()
+  })
+
+  // Body parser with size limit
   // @ts-expect-error expected
-  app.use(json())
+  app.use(json({ limit: '5mb' }))
 
   app.get('/', (_req, res) =>
     res.send(eta.render('index.html', { data: db.data })),

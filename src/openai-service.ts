@@ -1,4 +1,6 @@
-import { readFileSync } from 'node:fs'
+import { readFile } from 'node:fs/promises'
+import { resolve, normalize } from 'node:path'
+import { existsSync } from 'node:fs'
 import { config } from 'dotenv'
 import OpenAI from 'openai'
 import { OpenAIConfig, loadOpenAIConfig } from './types/openai-config.js'
@@ -12,16 +14,19 @@ config()
 export class OpenAIService {
   private openai: OpenAI
   private config: OpenAIConfig
+  private readonly allowedBasePath: string
 
   /**
    * 构造函数，初始化OpenAI客户端
    */
-  constructor() {
+  constructor(allowedBasePath?: string) {
     this.config = loadOpenAIConfig()
     this.openai = new OpenAI({
       apiKey: this.config.apiKey,
       baseURL: this.config.baseURL,
     })
+    // 设置允许访问的基础路径，默认为当前工作目录
+    this.allowedBasePath = allowedBasePath || process.cwd()
   }
 
   /**
@@ -33,8 +38,9 @@ export class OpenAIService {
     interfaceFilePath: string
   ): Promise<Record<string, unknown>> {
     try {
-      // 读取TypeScript接口文件内容
-      const interfaceContent = readFileSync(interfaceFilePath, 'utf-8')
+      // 验证并读取TypeScript接口文件内容
+      const validatedPath = this.validateFilePath(interfaceFilePath)
+      const interfaceContent = await readFile(validatedPath, 'utf-8')
       
       // 构建提示词
       const prompt = this.buildPrompt(interfaceContent)
@@ -68,6 +74,41 @@ export class OpenAIService {
     } catch (error) {
       throw new Error(`Failed to generate JSON from interface: ${error}`)
     }
+  }
+
+  /**
+   * 验证文件路径安全性，防止路径遍历攻击
+   * @param filePath 用户提供的文件路径
+   * @returns 验证后的安全文件路径
+   * @throws Error 如果路径不安全或文件不存在
+   */
+  private validateFilePath(filePath: string): string {
+    // 规范化路径，移除 .. 等相对路径符号
+    const normalizedPath = normalize(filePath)
+
+    // 解析为绝对路径
+    const resolvedPath = resolve(normalizedPath)
+    const allowedPath = resolve(this.allowedBasePath)
+
+    // 检查路径是否在允许的基础路径内
+    if (!resolvedPath.startsWith(allowedPath)) {
+      throw new Error(`Access denied: File path '${filePath}' is outside allowed directory`)
+    }
+
+    // 检查文件是否存在
+    if (!existsSync(resolvedPath)) {
+      throw new Error(`File not found: ${filePath}`)
+    }
+
+    // 检查文件扩展名（仅允许 .ts, .tsx, .d.ts 文件）
+    const allowedExtensions = ['.ts', '.tsx']
+    const hasValidExtension = allowedExtensions.some(ext => resolvedPath.endsWith(ext))
+
+    if (!hasValidExtension) {
+      throw new Error(`Invalid file type: Only TypeScript files (.ts, .tsx) are allowed`)
+    }
+
+    return resolvedPath
   }
 
   /**

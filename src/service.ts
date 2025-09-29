@@ -5,6 +5,72 @@ import inflection from 'inflection'
 import { Low } from 'lowdb'
 import sortOn from 'sort-on'
 
+/**
+ * 批量写入管理器，用于优化数据库写入性能
+ */
+class BatchWriteManager {
+  private pending = false
+  private writeTimeout: NodeJS.Timeout | null = null
+  private readonly batchDelay: number
+
+  constructor(batchDelay = 100) {
+    this.batchDelay = batchDelay
+  }
+
+  /**
+   * 批量写入数据库
+   * @param db 数据库实例
+   */
+  async batchWrite(db: Low<Data>): Promise<void> {
+    // 如果已有待处理的写入，清除之前的超时
+    if (this.writeTimeout) {
+      clearTimeout(this.writeTimeout)
+    }
+
+    // 如果当前没有写入在进行，设置延迟写入
+    if (!this.pending) {
+      this.pending = true
+      this.writeTimeout = setTimeout(async () => {
+        try {
+          await db.write()
+        } finally {
+          this.pending = false
+          this.writeTimeout = null
+        }
+      }, this.batchDelay)
+    }
+  }
+
+  /**
+   * 立即执行写入（用于关键操作）
+   * @param db 数据库实例
+   */
+  async immediateWrite(db: Low<Data>): Promise<void> {
+    if (this.writeTimeout) {
+      clearTimeout(this.writeTimeout)
+      this.writeTimeout = null
+    }
+
+    if (this.pending) {
+      await db.write()
+      this.pending = false
+    } else {
+      await db.write()
+    }
+  }
+
+  /**
+   * 清理资源
+   */
+  cleanup(): void {
+    if (this.writeTimeout) {
+      clearTimeout(this.writeTimeout)
+      this.writeTimeout = null
+    }
+    this.pending = false
+  }
+}
+
 export type Item = Record<string, unknown>
 
 export type Data = Record<string, Item[] | Item>
@@ -135,10 +201,19 @@ function fixAllItemsIds(data: Data) {
 
 export class Service {
   #db: Low<Data>
+  #batchWriter: BatchWriteManager
 
   constructor(db: Low<Data>) {
     fixAllItemsIds(db.data)
     this.#db = db
+    this.#batchWriter = new BatchWriteManager(100) // 100ms 批量延迟
+  }
+
+  /**
+   * 清理资源
+   */
+  cleanup(): void {
+    this.#batchWriter.cleanup()
   }
 
   #get(name: string): Item[] | Item | undefined {
@@ -374,7 +449,7 @@ export class Service {
     const item = { id: randomId(), ...data }
     items.push(item)
 
-    await this.#db.write()
+    await this.#batchWriter.batchWrite(this.#db)
     return item
   }
 
@@ -388,7 +463,7 @@ export class Service {
 
     const nextItem = (this.#db.data[name] = isPatch ? { item, ...body } : body)
 
-    await this.#db.write()
+    await this.#batchWriter.batchWrite(this.#db)
     return nextItem
   }
 
@@ -408,7 +483,7 @@ export class Service {
     const index = items.indexOf(item)
     items.splice(index, 1, nextItem)
 
-    await this.#db.write()
+    await this.#batchWriter.batchWrite(this.#db)
     return nextItem
   }
 
@@ -453,7 +528,7 @@ export class Service {
     const dependents = ensureArray(dependent)
     deleteDependents(this.#db, name, dependents)
 
-    await this.#db.write()
+    await this.#batchWriter.batchWrite(this.#db)
     return item
   }
 }
